@@ -1,30 +1,11 @@
 import numpy as np
 from qiskit import QuantumCircuit, QuantumRegister, ClassicalRegister
 from qiskit.circuit import Parameter
-from qiskit.primitives import Sampler
-from tqdm import tqdm
+from qiskit_aer.primitives import Sampler
 
-def generate_superiteration_times(tsamples, superiterations, si_time):
-    """Helper function to generate superiteration time parameters."""
-    if len(si_time) < len(tsamples) * superiterations:
-        raise ValueError("Insufficient si_time parameters for the given cycles and superiterations.")
-    
-    superiteration_parameter_binds = {}
-    for i in range(len(tsamples)):
-        superiteration_times = []
-        time = tsamples[i]
-        for _ in range(superiterations):
-            time /= 2
-            superiteration_times.append(time)
-        
-        for j in range(superiterations):
-            si_index = i * superiterations + j
-            superiteration_parameter_binds[si_time[si_index]] = superiteration_times[j]
-    
-    return superiteration_parameter_binds
-
+# # Define Fermi-Hubbard interaction gates for hopping and on-site terms
+# Hopping Gate
 def create_hopping_gate(J, delta_t):
-    """Create the hopping interaction gate."""
     f_circ = QuantumCircuit(2)
     f_circ.h([0, 1])
     f_circ.s([0, 1])
@@ -55,199 +36,158 @@ def create_hopping_gate(J, delta_t):
     hop_circ.append(g_gate, [0, 1])
     return hop_circ.to_gate(label=fr"A_gate_{J}")
 
+# On-site interaction gate
 def create_onsite_gate(U, delta_t):
-    """Create the on-site interaction gate."""
     onsite_circ = QuantumCircuit(2)
     onsite_circ.cx(0, 1)
     onsite_circ.rz(2*U * delta_t, 1)
     onsite_circ.cx(0, 1)
     return onsite_circ.to_gate(label=fr"B_gate_{U}")
 
+# Define the rodeo cycle
 def rodeo_cycle(num_sites, J_value, U_value, t: Parameter, r, targ: Parameter):
-    """Create a single rodeo cycle."""
-    beta = t / r
-    num_qubits = num_sites * 2
+    beta = t / r  # Parameter for rotation gates
+    num_qubits = num_sites * 2  # Each site has two qubits (spin-up and spin-down)
 
+    # Define quantum registers
     sys = QuantumRegister(num_qubits, 's')
     aux = QuantumRegister(1, 'a')
     qc = QuantumCircuit(sys, aux)
 
+    # Apply Hadamard on the auxiliary qubit to create superposition
     qc.h(aux[0])
-    
+
+    # Trotter evolution within this single Rodeo cycle
     A_gate = create_hopping_gate(J=-J_value, delta_t=beta)
+    # A_gate = create_hopping_gate(J=-2*J_value, delta_t=beta)
     B_gate = create_onsite_gate(U=U_value, delta_t=beta)
 
     qc.cz([sys[0], sys[1]], aux[0])
     for _ in range(r):
-        # Hopping terms for spin-up qubits
-        for site in range(0, num_sites - 1, 2):
-            qc.append(A_gate, [site * 2, (site + 1) * 2])
-        for site in range(1, num_sites - 1, 2):
-            qc.append(A_gate, [site * 2, (site + 1) * 2])
-
-        # Hopping terms for spin-down qubits
-        for site in range(0, num_sites - 1, 2):
-            qc.append(A_gate, [site * 2 + 1, (site + 1) * 2 + 1])
-        for site in range(1, num_sites - 1, 2):
-            qc.append(A_gate, [site * 2 + 1, (site + 1) * 2 + 1])
-
-        # CX gates
-        for i in range(0, num_qubits, 4):
-            qc.cx(aux[0], sys[i])
-            if i + 2 < num_qubits:
-                qc.cx(aux[0], sys[i + 2])
-
-        # On-site interactions
-        for site in range(num_sites):
-            qc.append(B_gate, [site * 2, site * 2 + 1])
-
-        # Second set of CX gates
-        for i in range(0, num_qubits, 4):
-            qc.cx(aux[0], sys[i])
-            if i + 2 < num_qubits:
-                qc.cx(aux[0], sys[i + 2])
     
+        # qc.cz([sys[0], sys[1]], aux[0])
+        # Apply A_gate for hopping terms on nearest neighbors for spin-up qubits
+        for site in range(0, num_sites - 1, 2):  # Even sites for spin-up qubits
+            spin_up_qubit_1 = site * 2
+            spin_up_qubit_2 = (site + 1) * 2
+            qc.append(A_gate, [spin_up_qubit_1, spin_up_qubit_2])
+
+        for site in range(1, num_sites - 1, 2):  # Odd sites for spin-up qubits
+            spin_up_qubit_1 = site * 2
+            spin_up_qubit_2 = (site + 1) * 2
+            qc.append(A_gate, [spin_up_qubit_1, spin_up_qubit_2])
+
+        # Apply A_gate for hopping terms on nearest neighbors for spin-down qubits
+        for site in range(0, num_sites - 1, 2):  # Even sites for spin-down qubits
+            spin_down_qubit_1 = site * 2 + 1
+            spin_down_qubit_2 = (site + 1) * 2 + 1
+            qc.append(A_gate, [spin_down_qubit_1, spin_down_qubit_2])
+
+        for site in range(1, num_sites - 1, 2):  # Odd sites for spin-down qubits
+            spin_down_qubit_1 = site * 2 + 1
+            spin_down_qubit_2 = (site + 1) * 2 + 1
+            qc.append(A_gate, [spin_down_qubit_1, spin_down_qubit_2])
+
+        # qc.cz([sys[0], sys[1]], aux[0])
+
+        # Add CX gates for every other system qubit
+        for i in range(0, num_qubits, 4):
+            qc.cx(aux[0], sys[i])  # Controlled X on selected system qubits
+            if i + 2 < num_qubits:
+                qc.cx(aux[0], sys[i + 2])
+
+        # Apply B_gate for on-site interactions on each site
+        for site in range(num_sites):
+            spin_up_qubit = site * 2
+            spin_down_qubit = site * 2 + 1
+            qc.append(B_gate, [spin_up_qubit, spin_down_qubit])
+
+        # # Add CX gates for every other system qubit again
+        for i in range(0, num_qubits, 4):
+            qc.cx(aux[0], sys[i])  # Controlled X on selected system qubits
+            if i + 2 < num_qubits:
+                qc.cx(aux[0], sys[i + 2])
+        
     qc.cz([sys[0], sys[1]], aux[0])
+
+
+    # Phase rotation based on the energy target and time sample
     qc.p(2*targ * t, aux[0])
     qc.h(aux[0])
 
     return qc
 
-def create_rodeo_circuit(num_sites, J_input, U_input, cycles, iterations, steps=5):
-    """
-    Create a complete rodeo circuit with the specified parameters.
+# def generate_superiteration_times(tsamples, superiterations, si_time):
+
+#     # Validate the size of si_time
+#     if len(si_time) < len(tsamples) * superiterations:
+#         raise ValueError("Insufficient si_time parameters for the given cycles and superiterations.")
     
-    Args:
-        num_sites (int): Number of sites in the system
-        J_input (float): Hopping parameter
-        U_input (float): On-site interaction strength
-        cycles (int): Number of rodeo cycles
-        iterations (int): Number of iterations per cycle
-        steps (int, optional): Number of Trotter steps. Defaults to 5.
+#     superiteration_parameter_binds = {}
     
-    Returns:
-        tuple: (QuantumCircuit, list of time Parameters, list of SI time Parameters, target Parameter)
-    """
+
+#     for i in range(len(tsamples)):
+
+#         superiteration_times = []
+#         time = tsamples[i]
+#         for _ in range(superiterations):
+#             time /= 2
+#             superiteration_times.append(time)
+        
+#         for j in range(superiterations):
+#             si_index = i * superiterations + j
+#             superiteration_parameter_binds[si_time[si_index]] = superiteration_times[j]
+    
+#     return superiteration_parameter_binds
+
+def generate_superiteration_times(tsamples, superiterations, si_time):
+    if len(si_time) < len(tsamples) * superiterations:
+        raise ValueError("Insufficient si_time parameters for the given cycles and superiterations.")
+    
+    superiteration_parameter_binds = {}
+    
+    for i in range(len(tsamples)):
+        time = tsamples[i]
+        for j in range(superiterations):
+            si_index = i * superiterations + j
+            superiteration_parameter_binds[si_time[si_index]] = time / (2**j)
+    
+    return superiteration_parameter_binds
+
+def create_rodeo_circuit(num_sites:int, J_input: float, U_input: float, cycles: int, super_iterations:int, 
+                   trotter_steps:int):
+
+    # Initialize Qiskit parameters
+    iterations = super_iterations
+    steps = trotter_steps
     target = Parameter(r'$E_\odot$')
     time = [Parameter(fr'$t_{i}$') for i in range(cycles)]
     si_time = [Parameter(fr'$st_{j}$') for j in range(cycles * iterations)]
-    
+
+    # Create registers and circuit
     classical = ClassicalRegister(cycles * (1 + iterations), 'c')
     aux = QuantumRegister(1, 'a')
     sys = QuantumRegister(num_sites * 2, 's')
     circuit = QuantumCircuit(sys, aux, classical)
-    
-    # Initial state preparation
+
     circuit.x([sys[1], sys[2]])
-    
+
+    # Create circuit with alternating rodeo cycles and super iterations
     classical_idx = 0
-    super_idx = 0
-    
+    super_idx = 0 
+
     for j in range(cycles):
-        rodeo_gate = rodeo_cycle(num_sites=num_sites, J_value=J_input, U_value=U_input,
-                                t=time[j], r=steps, targ=target)
+        rodeo_gate = rodeo_cycle(num_sites=num_sites, J_value=J_input, U_value=U_input, t=time[j], r=steps, targ=target)
         circuit.append(rodeo_gate.to_gate(label=fr'Rodeo_Cycle_{j}'), range(num_sites * 2 + 1))
         circuit.measure(aux, classical[classical_idx])
-        classical_idx += 1
-        
+        classical_idx += 1 
+
+        # Add super iteration cycles with si_time
         for k in range(iterations):
-            rodeo_gate_si = rodeo_cycle(num_sites=num_sites, J_value=J_input, U_value=U_input,
-                                      t=si_time[super_idx], r=steps, targ=target)
-            circuit.append(rodeo_gate_si.to_gate(label=fr'SI_Rodeo_Cycle_{j}_{k}'),
-                         range(num_sites * 2 + 1))
+            rodeo_gate_si = rodeo_cycle(num_sites=num_sites, J_value=J_input, U_value=U_input, t=si_time[super_idx], r=steps, targ=target)
+            circuit.append(rodeo_gate_si.to_gate(label=fr'SI_Rodeo_Cycle_{j}_{k}'), range(num_sites * 2 + 1))
             circuit.measure(aux, classical[classical_idx])
-            classical_idx += 1
-            super_idx += 1
-    
-    return circuit, time, si_time, target
+            classical_idx += 1 
+            super_idx += 1 
 
-def run_rodeo_simulation(circuit, time_params, si_time_params, target_param, 
-                        energy_min, energy_max, delta_energy, gamma, 
-                        timeresamples=10, shots_per_time=1024):
-    """
-    Run the rodeo simulation for a range of energies.
-    
-    Args:
-        circuit (QuantumCircuit): The quantum circuit to run
-        time_params (list): List of time Parameters
-        si_time_params (list): List of superiteration time Parameters
-        target_param (Parameter): Target energy Parameter
-        energy_min (float): Minimum energy to scan
-        energy_max (float): Maximum energy to scan
-        delta_energy (float): Energy step size
-        gamma (float): Gamma parameter for time sampling
-        timeresamples (int, optional): Number of time samples. Defaults to 10.
-        shots_per_time (int, optional): Number of shots per time sample. Defaults to 1024.
-    
-    Returns:
-        tuple: (energies, probabilities)
-    """
-    cycles = len(time_params)
-    iterations = len(si_time_params) // cycles
-    print(f"Total expected measurements: {cycles * (1 + iterations)}")
-    print(f"Cycles: {cycles}, Iterations: {iterations}")
-    energies = np.arange(energy_min, energy_max + delta_energy, delta_energy)
-    all_probabilities = []
-    
-    for energy in tqdm(energies, desc="Processing energies", ncols=100):
-        targ_energy = {target_param: energy}
-        probabilities_0 = []
-        
-        for _ in range(timeresamples):
-            tsamples = ((1 / gamma) * np.random.randn(len(time_params))).tolist()
-            time_parameters = dict(zip(time_params, tsamples))
-            superiteration_parameters = generate_superiteration_times(
-                tsamples, 
-                superiterations=len(si_time_params)//len(time_params),
-                si_time=si_time_params
-            )
-            
-            # Assign parameters and run circuit
-            circuit_bound = circuit.assign_parameters(time_parameters, inplace=False)
-            circuit_bound = circuit_bound.assign_parameters(targ_energy, inplace=False)
-            circuit_bound = circuit_bound.assign_parameters(superiteration_parameters, inplace=False)
-            
-            sampler = Sampler()
-            result = sampler.run(circuit_bound, shots=shots_per_time).result()
-            quasi_dists = result.quasi_dists
-            
-            for dist in quasi_dists:
-                probabilities_0.append(dist.get(0, 0))
-        
-        avg_prob_0 = np.mean(probabilities_0)
-        all_probabilities.append(avg_prob_0)
-    
-    return energies, all_probabilities
-
-def assign_circuit_parameters(circuit, time_params, si_time_params, target_param, gamma, energy):
-    """
-    Assign given circuit parameters to circuit
-    
-    Args:
-        circuit (QuantumCircuit): The quantum circuit to run
-        time_params (list): List of time Parameters
-        si_time_params (list): List of superiteration time Parameters
-        target_param (Parameter): Target energy Parameter
-        gamma (float): Gamma parameter for time sampling
-    
-    Returns:
-        tuple: (energies, probabilities)
-    """
-
-    tsamples = ((1 / gamma) * np.random.randn(len(time_params))).tolist()
-    time_parameters = dict(zip(time_params, tsamples))
-    superiteration_parameters = generate_superiteration_times(
-        tsamples, 
-        superiterations=len(si_time_params)//len(time_params),
-        si_time=si_time_params
-    )
-
-    targ_energy = {target_param : energy}
-    
-    # Assign parameters and run circuit
-    circuit_bound = circuit.assign_parameters(time_parameters, inplace=False)
-    circuit_bound = circuit_bound.assign_parameters(targ_energy, inplace=False)
-    circuit_bound = circuit_bound.assign_parameters(superiteration_parameters, inplace=False)
-
-    return circuit_bound
-
+    return circuit, target, time, si_time
